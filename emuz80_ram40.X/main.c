@@ -68,7 +68,7 @@
 #include "iopin.h"
 #include "xprintf.h"
 
-#define Z80_CLK 2000000UL // Z80 clock frequency(Max 20MHz)
+#define Z80_CLK 16000000UL // Z80 clock frequency(Max 20MHz)
 
 #define _XTAL_FREQ 64000000UL
 
