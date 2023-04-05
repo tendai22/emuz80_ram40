@@ -68,7 +68,7 @@
 #include "iopin.h"
 #include "xprintf.h"
 
-#define Z80_CLK 16000000UL // Z80 clock frequency(Max 20MHz)
+#define Z80_CLK 14000000UL // Z80 clock frequency(Max 20MHz)
 
 #define _XTAL_FREQ 64000000UL
 
@@ -107,7 +107,7 @@ char peek_ram(addr_t addr)
     char c;
     TRISD &= ~0x3f;
     TRISB = 0;  // A0-13 output
-    LATD = ((unsigned char)((addr >> 8) & 0x3f));
+    LATD = ((LATD & 0xc0) | (unsigned char)((addr >> 8) & 0x3f));
     LATB = (unsigned char)(addr & 0xff);
     db_setin();
     LATA4 = 0;  // RA4: OE = 0;
@@ -115,7 +115,7 @@ char peek_ram(addr_t addr)
     nop; nop; nop; nop; nop; nop; nop;   // dummy write for 400ns
     c = PORTC;
     LATA4 = 1;
-    TRISD |= 0xff;
+    TRISD |= 0x3f;
     TRISB = 0xff;   // A0-12 input
     return c;
 }
@@ -125,7 +125,7 @@ void poke_ram(addr_t addr, char c)
     //xprintf("(%04x,%02x)", addr, c);
     TRISD &= ~0x3f;
     TRISB = 0;  // A0-13 output
-    LATD = ((unsigned char)((addr >> 8) & 0x3f));
+    LATD = ((LATD & 0xc0) | (unsigned char)((addr >> 8) & 0x3f));
     LATB = (unsigned char)(addr & 0xff);
     db_setout();
     LATC = c;
@@ -213,7 +213,7 @@ void clear_all(void)
             xprintf("%X", i++);
         }
         poke_ram(p, 0);
-    } while (p++ != 0xdfff);
+    } while (p++ != 0xffff);
 }
 
 void manualboot(void)
@@ -666,15 +666,18 @@ void main(void) {
                 //cc = (U3TXBE ? 0x20 : 0) | (U3RXBE ? 2 : 0);
                 cc = PIR9;
                 db_setout();
+                TOGGLE;
                 LATC = cc; // U3 flag
+                TOGGLE;
+                //for (int i = 6; i-- > 0; ) nop;
             } else if(addr == UART_DREG) { // UART data register
                 cc = U3RXB; // U3 RX buffer
                 while(!(PIR9 & 2));
                 db_setout();
+                TOGGLE;
                 LATC = cc;
                 TOGGLE;
-                for (int i = 3; i-- > 0; ) nop;
-                TOGGLE;
+                //for (int i = 6; i-- > 0; ) nop;
             //} else if((addr & 0xff00) == DBG_PORT) {
             //    monitor_mode = 2;   // DBG_PORT read
             } else { // invalid address
@@ -695,12 +698,12 @@ void main(void) {
                 // this cycle actually starts at /MREQ down edge,
                 // so too early PORTC reading will get garbage.
                 // We need to wait for stable Z80 data bus.
-                TOGGLE;
-                for (int i = 5; i-- > 0; ) nop;
+                //for (int i = 5; i-- > 0; ) nop;
                 TOGGLE;
                 U3TXB = PORTC; // Write into U3 TX buffer
+                TOGGLE;
                 //xprintf("(%02X)", PORTC);
-                while(!(PIR9 & 2));
+                //while(!(PIR9 & 2));
             //while(PIR9 & 2);
             //} else if((addr & 0xfff00) == DBG_PORT) {
             //    monitor_mode = 1;   // DBG_PORT write
@@ -721,7 +724,9 @@ void main(void) {
         reset_DFF(); // reset D-FF, /DTACK be zero
         while(RA0 == 0 || RA1 == 0); // Wait for DS = 1;
         //for (int i = 3; i-- > 0;) nop;
+        TOGGLE;
         db_setin(); // Set data bus as input
+        TOGGLE;
         BUSRQ_off();
     }
 }
