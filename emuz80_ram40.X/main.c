@@ -68,7 +68,7 @@
 #include "iopin.h"
 #include "xprintf.h"
 
-#define Z80_CLK 16000000UL // Z80 clock frequency(Max 20MHz)
+#define Z80_CLK 2000000UL // Z80 clock frequency(Max 20MHz)
 
 #define _XTAL_FREQ 64000000UL
 
@@ -89,6 +89,8 @@ int ss_flag = 0;
 #define db_setin() (TRISC = 0xff)
 #define db_setout() (TRISC = 0x00)
 
+static void reset_DFF(void);
+
 // UART3 Transmit
 void putchx(int c) {
     while(!U3TXBE); // Wait for Tx buffer empty
@@ -101,42 +103,6 @@ int getchx(void) {
     return U3RXB; // Read data
 }
 
-// peek, poke
-char peek_ram(addr_t addr)
-{
-    char c;
-    TRISD &= ~0x3f;
-    TRISB = 0;  // A0-13 output
-    LATD = ((LATD & 0xc0) | (unsigned char)((addr >> 8) & 0x3f));
-    LATB = (unsigned char)(addr & 0xff);
-    db_setin();
-    LATA4 = 0;  // RA4: OE = 0;
-#define nop asm("  nop")
-    nop; nop; nop; nop; nop; nop; nop;   // dummy write for 400ns
-    c = PORTC;
-    LATA4 = 1;
-    TRISD |= 0x3f;
-    TRISB = 0xff;   // A0-12 input
-    return c;
-}
-
-void poke_ram(addr_t addr, char c)
-{
-    //xprintf("(%04x,%02x)", addr, c);
-    TRISD &= ~0x3f;
-    TRISB = 0;  // A0-13 output
-    LATD = ((LATD & 0xc0) | (unsigned char)((addr >> 8) & 0x3f));
-    LATB = (unsigned char)(addr & 0xff);
-    db_setout();
-    LATC = c;
-    LATA2 = 0;  // RA2: WE = 0;
-    nop; nop; nop; nop; nop; nop; nop;   // dummy write for 400ns
-    LATA2 = 1;
-    db_setin();
-    TRISD |= 0x3f;
-    TRISB = 0xff;   // A0-15 input
-}
-    
 void BUSRQ_on(void)
 {
     LATE0 = 0;
@@ -160,6 +126,127 @@ void RESET_off(void)
     //TRISE2 = 1; // set as input
     LATE1 = 1;
 }
+#define DIRECT_MODE
+#if defined(DIRECT_MODE)
+
+void RESET_CS2(void)
+{
+    LATA2 = 0;
+}
+
+void SET_CS2()
+{
+    LATA2 = 1;
+}
+
+#define nop asm("  nop")
+
+static addr_t cur_addr = 0;
+
+
+void putDataBus(unsigned char c)
+{
+    if (!RE1) {
+        RESET_off();
+    }
+    while (RD6);    // wait for /WAIT becomes L
+    // now in wait
+    //xprintf("%04X(%02X):%c %02X\n", cur_addr, PORTB, (RA5 ? 'W' : 'R'), c);
+    if (!RA5) { // /RD == L
+        RESET_CS2();
+        // RD cycle
+        db_setout();
+        TOGGLE;
+        LATC = c;
+        TOGGLE;
+    }
+end_of_cycle:
+    while(RA0 && RA1); // Wait for IORQ == L or MREQ == L;
+    BUSRQ_on();
+    reset_DFF(); // reset D-FF, /DTACK be zero
+    while(RA0 == 0 || RA1 == 0); // Wait for DS = 1;
+    TOGGLE;
+    db_setin(); // Set data bus as input
+    TOGGLE;
+    SET_CS2();
+    BUSRQ_off();
+}
+
+void setAddr(addr_t a)
+{
+    if (cur_addr == a)
+        return;         // HL should have a value of a
+                        // no need to set a to HL
+    RESET_on();
+    nop; nop; nop; nop; nop; nop;
+    RESET_off();
+    putDataBus(0x21);
+    putDataBus(a & 0xff);
+    putDataBus((a>>8)&0xff);
+    cur_addr = a;
+}
+
+unsigned char getDataBus()
+{
+    unsigned char c;
+    if (!RE1) {
+        RESET_off();
+    }
+    while (RD6);    // wait for /WAIT becomes L
+    // now in wait
+    //xprintf("%04X(%02X):%c ", cur_addr, PORTB, (RA5 ? 'W' : 'R'));
+    if (!RA5) {
+        // RD cycle
+        TOGGLE;
+        RESET_CS2();
+        nop; nop; nop; nop;
+        c = PORTC;
+        SET_CS2();
+        //xprintf("%02X", c);
+        TOGGLE;
+    }
+    //xprintf("\n");
+end_of_cycle:
+    while(RA0 && RA1); // Wait for IORQ == L or MREQ == L;
+    BUSRQ_on();
+    reset_DFF(); // reset D-FF, /DTACK be zero
+    while(RA0 == 0 || RA1 == 0); // Wait for DS = 1;
+    TOGGLE;
+    db_setin(); // Set data bus as input
+    TOGGLE;
+    BUSRQ_off();
+    return c;
+}
+
+// peek, poke
+char peek_ram(addr_t addr)
+{
+    char c;
+    reset_DFF();
+    setAddr(addr);
+    nop; nop; nop; nop; nop; nop; nop;   // dummy write for 400ns
+    putDataBus(0x7e);   // LD A,(HL)
+    c = getDataBus();   // A <- (HD)
+    putDataBus(0x23);   // INC HL
+    cur_addr++;
+    RESET_on();
+    return c;
+}
+
+void poke_ram(addr_t addr, char c)
+{
+    reset_DFF();
+    setAddr(addr);
+    putDataBus(0x3e);   // LD A,n
+    putDataBus(c);      // A <- databus(c)
+    putDataBus(0x77);   // LD (HL),A
+    // (HL) <- MEMWR cycle invisible
+    putDataBus(0x23);   // INC HL
+    cur_addr++;
+    RESET_on();
+}
+    
+#endif //DIRECT_MODE
 
 static int uc = -1;
 int getchr(void)
@@ -338,7 +425,7 @@ void monitor(int monitor_mode)
     }
 }
 
-void reset_DFF(void)
+static void reset_DFF(void)
 {
     //TOGGLE;
     CLCSELECT = 2;      // CLC3 select
@@ -486,9 +573,9 @@ void main(void) {
     LATA4 = 1;  // WE negate
     TRISA4 = 0; // set as output
     
-    // RA2: SRAM WE pin
+    // RA2: SRAM CS2 pin
     ANSELA2 = 0;
-    LATA2 = 1;  // OE negate
+    LATA2 = 1;  // CS2 negate
     TRISA2 = 0; // set as output
 
     // RA1: MREQ input pin
@@ -535,7 +622,60 @@ void main(void) {
     RA4PPS = 0x0;  // LATA4 -> RA4 -> /OE
     RA2PPS = 0x0;  // LATA2 -> RA2 -> /WE
     RD6PPS = 0x0;  // LATD6 -> RD6 -> WAIT
+#if defined(DIRECT_MODE)
+    // direct mode
+    // CLC pin assign
+    // 0, 1, 4, 5: Port A, C
+    // 2, 3, 6, 7: Port B, D
+    CLCIN0PPS = 0x01;   // RA1 <- /MREQ
+    CLCIN1PPS = 0x00;   // RA0 <- /IORQ
+    CLCIN2PPS = 0x1F;   // RD7 <- /RFSH
+    CLCIN3PPS = 0x1E;   // RD6 <- /WAIT
+    CLCIN4PPS = 0x05;   // RA5 <- /RD
 
+    // ============ CLC1 MEMRD gate
+    // /OE = (/MREQ == 0 && /RD == 0 && /RFSH == 1)
+    CLCSELECT = 0;  // CLC1 select
+    CLCnCON &= ~0x80;
+    
+    CLCnSEL0 = 0;       // CLCIN0PPS <- /MREQ
+    CLCnSEL1 = 2;       // CLCIN2PPS <- /RFSH
+    CLCnSEL2 = 4;       // CLCIN4PPS <- /RD
+    CLCnSEL3 = 127;     // NC
+    
+    CLCnGLS0 = 0x01;    // /MREQ == 0 (inverted)
+    CLCnGLS1 = 0x08;    // /RFSH == 1 (non-inverted)
+    CLCnGLS2 = 0x10;    // /RD == 0 (inverted)
+    CLCnGLS3 = 0x40;    // 1 for AND gate
+    
+    CLCnPOL = 0x80;     // inverted the CLC1 output
+    CLCnCON = 0x82;     // 4 input AMD
+
+    // ============== CLC3 /WAIT
+    // /MREQ == L && /RFSH == H && /RD == L
+    CLCSELECT = 2;      // CLC3 select
+    CLCnCON &= ~0x80;
+    
+    CLCnSEL0 = 0x33;    // D-FF CLK <- CLC1 <- /MREQ && /RD && !/RFSH
+    CLCnSEL1 = 127;     // D-FF D NC
+    CLCnSEL2 = 127;     // D-FF SET NC
+    CLCnSEL3 = 127;     // D-FF RESET NC
+    
+    CLCnGLS0 = 0x01;    // /IORQ ~|_  (inverted)
+    CLCnGLS1 = 0x40;    // D-FF D NC (1 for D-FF D)
+    CLCnGLS2 = 0x80;    // D-FF SET (soft reset)
+    CLCnGLS3 = 0x00;    // 0 for D-FF RESET
+
+    // reset D-FF
+    CLCnGLS2 = 0x40;    // 1 for D-FF RESET
+    CLCnGLS2 = 0x80;    // 0 for D-FF RESET
+
+    CLCnPOL = 0x80;     // non inverted the CLC3 output
+    CLCnCON = 0x84;     // Select D-FF (no interrupt)
+    
+    RD6PPS = 0x03;       // RD6 (/WAIT) <- D-FF (CLC3OUT)
+        
+#endif //DIRECT_MODE
     U3ON = 1; // Serial port enable
     xprintf(";");
     manualboot();
@@ -630,8 +770,16 @@ void main(void) {
     // Now we change GPIO pins to be switched
     // 1, 2, 5, 6: Port A, C
     // 3, 4, 7, 8: Port B, D
-    RA4PPS = 0x01;      // CLC1 -> RA4 -> /OE
+#if defined(DIRECT_MODE)
+    RA4PPS = 0;
+    RA2PPS = 0;
+    TRISA4 = 1;     // RA4 not used, so set INPUT
+    // also, CE2 always asserted
+    SET_CS2();
+#else
+    RA4PPS = 0x04;      // CLC1 -> RA4 -> /OE
     RA2PPS = 0x02;      // CLC2 -> RA2 -> /WE
+#endif
     RD6PPS = 0x03;      // CLC3 -> RD6 -> /WAIT
     
     xprintf("start ss = %d, bp = %04X\n", ss_flag, break_address);
