@@ -155,6 +155,7 @@ void putDataBus(unsigned char c)
     if (!RA5) { // /RD == L
         RESET_CS2();
         // RD cycle
+        nop; nop; nop;
         db_setout();
         TOGGLE;
         LATC = c;
@@ -164,7 +165,7 @@ end_of_cycle:
     while(RA0 && RA1); // Wait for IORQ == L or MREQ == L;
     BUSRQ_on();
     reset_DFF(); // reset D-FF, /DTACK be zero
-    while(RA0 == 0 || RA1 == 0); // Wait for DS = 1;
+    while(RA1 == 0); // Wait for DS = 1;
     TOGGLE;
     db_setin(); // Set data bus as input
     TOGGLE;
@@ -198,10 +199,8 @@ unsigned char getDataBus()
     if (!RA5) {
         // RD cycle
         TOGGLE;
-        RESET_CS2();
         nop; nop; nop; nop;
         c = PORTC;
-        SET_CS2();
         //xprintf("%02X", c);
         TOGGLE;
     }
@@ -210,7 +209,7 @@ end_of_cycle:
     while(RA0 && RA1); // Wait for IORQ == L or MREQ == L;
     BUSRQ_on();
     reset_DFF(); // reset D-FF, /DTACK be zero
-    while(RA0 == 0 || RA1 == 0); // Wait for DS = 1;
+    while(RA1 == 0); // Wait for DS = 1;
     TOGGLE;
     db_setin(); // Set data bus as input
     TOGGLE;
@@ -222,7 +221,6 @@ end_of_cycle:
 char peek_ram(addr_t addr)
 {
     char c;
-    reset_DFF();
     setAddr(addr);
     nop; nop; nop; nop; nop; nop; nop;   // dummy write for 400ns
     putDataBus(0x7e);   // LD A,(HL)
@@ -230,12 +228,13 @@ char peek_ram(addr_t addr)
     putDataBus(0x23);   // INC HL
     cur_addr++;
     RESET_on();
+    nop; nop; nop;
+    reset_DFF();
     return c;
 }
 
 void poke_ram(addr_t addr, char c)
 {
-    reset_DFF();
     setAddr(addr);
     putDataBus(0x3e);   // LD A,n
     putDataBus(c);      // A <- databus(c)
@@ -244,6 +243,8 @@ void poke_ram(addr_t addr, char c)
     putDataBus(0x23);   // INC HL
     cur_addr++;
     RESET_on();
+    nop; nop; nop;
+    reset_DFF();
 }
     
 #endif //DIRECT_MODE
@@ -320,6 +321,8 @@ void manualboot(void)
             addr_t start, end;
             start = min & 0xfff0;
             end = max;
+            if (end > 0x40)
+                end = 0x40;
             while (start < end) {
                 if ((start & 0xf) == 0) {
                     xprintf("%04X ", start);  
@@ -591,6 +594,7 @@ void main(void) {
     ANSELA3 = 0; // Disable analog function
     TRISA3 = 0; // NCO output pin
     NCO1INC = Z80_CLK * 2 / 61;
+    NCO1INC = 0x10000;
     NCO1CLK = 0x00; // Clock source Fosc
     NCO1PFM = 0;  // FDC mode
     NCO1OUT = 1;  // NCO output enable
