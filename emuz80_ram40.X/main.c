@@ -565,6 +565,8 @@ void main(void) {
     NCO1PFM = 0;  // FDC mode
     NCO1OUT = 1;  // NCO output enable
     NCO1EN = 1;   // NCO enable
+    
+    //RA3PPS = 0;     // internal clock disable
 
     // UART3 initialize
 //    U3BRG = 416; // 9600bps @ 64MHz
