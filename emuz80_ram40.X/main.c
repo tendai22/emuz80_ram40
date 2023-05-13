@@ -83,6 +83,8 @@ union {
     };
 } ab;
 
+#define nop asm("  nop")
+
 addr_t break_address = 0; // break_address is zero, it is invalid
 int ss_flag = 0;
 
@@ -139,7 +141,33 @@ void SET_CS2()
     LATA2 = 1;
 }
 
-#define nop asm("  nop")
+void SRAM_for_PIC(void)
+{
+    // RA1: MREQ input pin
+    LATA1 = 1;  // /MREQ negate
+    TRISA1 = 0; // Set as input
+    // RA2: WR:
+    LATA2 = 1;
+    TRISA2 = 0;
+    // RA5: RD
+    LATA5 = 1;
+    TRISA5 = 0;
+    nop; nop; nop; nop;
+    nop; nop; nop; nop;
+    TRISD &= 0xc0;
+    TRISB = 0;
+}
+
+void SRAM_for_Z80(void)
+{
+    // /MREQ, /RD, /WR, A12-A0 becoume input
+    TRISA1 = 1;
+    TRISA2 = 1;
+    TRISA5 = 1;
+    
+    TRISD |= 0x3f;
+    TRISB = 0xff;
+}
 
 static addr_t cur_addr = 0;
 
@@ -212,9 +240,21 @@ end_of_cycle:
 }
 
 // peek, poke
-char peek_ram(addr_t addr)
+
+// fetch/depisot_ram access RAM physically, put out addr on A0-An,
+// put/get data on D0-D7 and manipulate /MREQ, /RD and/or /WR.
+// In only8boot mode, only addresses 0000h to 000Fh are available to
+// this physical access.
+//
+// peek/poke_ram uses by running small codes in which we get/put a byte data on
+// SRAM, all other addresses between 0 to 000Fh are accesible by Z80 CPU only.
+// So in any single byte access we put some bytes of Z80 machine codes 
+// starts on 0 and reset restart to run this code.
+
+char fetch_ram(addr_t addr)
 {
     char c;
+    SRAM_for_PIC();
     setAddr(addr);
     db_setin();
     LATA1 = 0;  // /MREQ = 0;
@@ -226,8 +266,9 @@ char peek_ram(addr_t addr)
     return c;
 }
 
-void poke_ram(addr_t addr, char c)
+void deposit_ram(addr_t addr, char c)
 {
+    SRAM_for_PIC();
     setAddr(addr);
     db_setout();
     LATC = c;
@@ -238,7 +279,110 @@ void poke_ram(addr_t addr, char c)
     LATA1 = 1;
     db_setin();
 }
-    
+
+static char hidden_array[16];
+
+char peek_ram(addr_t addr)
+{
+    char c;
+#if USE_ADDRESS_BUS
+    // Now using established direct access
+    SRAM_for_PIC();
+    setAddr(addr);
+    db_setin();
+    LATA1 = 0;  // /MREQ = 0;
+    LATA5 = 0;  // /RQ = 0;
+    nop; nop; nop; nop; nop; nop; nop; nop;
+    c = PORTC;
+    LATA5 = 1;
+    LATA1 = 1;
+    return c;
+#else
+    if (addr < 16) {
+        // use direct code
+        return hidden_array[addr];
+    }
+    // other cases, put small code and run
+    SRAM_for_PIC();
+    BUSRQ_on();
+    RESET_off();                // enter BUSRQ mode
+    ab.w = addr;
+    deposit_ram(0, 0x3a);       // LD A,(addr)
+    deposit_ram(1, (addr&255));
+    deposit_ram(2, (addr/256));
+    deposit_ram(3, 0xd3);       // OUT (address zero),A 
+    deposit_ram(4, 0);
+    deposit_ram(5, 0x76);       // HALT
+    SRAM_for_Z80();
+    RESET_on();
+    nop; nop; nop; nop;
+    BUSRQ_off();
+    RESET_off();            // start Z80
+    while(RA0);     // wait until any in/out instruction
+    nop; nop; nop; nop;
+    db_setin();
+    c = PORTC;
+    RESET_on();
+    reset_DFF();
+    return c;
+#endif    
+}
+
+static void deposit_array(addr_t addr, char c)
+{
+    hidden_array[addr & 0xf] = c;
+}
+
+static void restore_array(void)
+{
+    for (addr_t i = 0; i < 16; ++i) {
+        deposit_ram(i, hidden_array[i]);
+    }
+}
+
+void poke_ram(addr_t addr, char c)
+{
+    if (addr < 16) {
+        // use direct code
+        deposit_array(addr, c);
+        return;
+    }
+    // other cases, put small code and run
+    SRAM_for_PIC();
+    BUSRQ_on();
+    RESET_off();                // enter BUSRQ mode
+    ab.w = addr;
+    deposit_ram(0, 0x3e);       // LD A,(nn)
+    deposit_ram(1, c);
+    deposit_ram(2, 0x32);         // LD (addr), A
+    deposit_ram(3, (addr&255));
+    deposit_ram(4, (addr/256));
+    deposit_ram(5, 0xdb);       // IN A,(address zero) 
+    deposit_ram(6, 0);
+    deposit_ram(7, 0x76);       // HALT
+    SRAM_for_Z80();
+    RESET_on();
+    nop; nop; nop; nop;
+    BUSRQ_off();
+    RESET_off();            // start Z80
+    while(RA0);     // wait until any in/out instruction
+    RESET_on();
+    reset_DFF();
+}
+
+void init_boot(void)
+{
+    RESET_on();         // enter RESET mode
+    SRAM_for_PIC();
+}
+
+void end_boot(void)
+{
+    // later, you should put codes where it copies hidden_array[] to SRAM 0-0fh.
+    restore_array();
+    SRAM_for_Z80();
+}
+
 #endif //DIRECT_MODE
 
 static int uc = -1;
@@ -560,7 +704,7 @@ void main(void) {
     ANSELA3 = 0; // Disable analog function
     TRISA3 = 0; // NCO output pin
     NCO1INC = Z80_CLK * 2 / 61;
-    NCO1INC = 0x80000;
+    NCO1INC = 0x40000;
     NCO1CLK = 0x00; // Clock source Fosc
     NCO1PFM = 0;  // FDC mode
     NCO1OUT = 1;  // NCO output enable
@@ -598,31 +742,16 @@ void main(void) {
     U3ON = 1; // Serial port enable
     xprintf(";");
 
-    // BUSREQ and PIC controls MREQ/RD/WR
-    // boot mode
-    // RA5: /RD, SRAM /OE pin
-    ANSELA5 = 0;
-    LATA5 = 1;  // /RD negate
-    TRISA5 = 0; // set as input
-    
-    // RA2: /WR, SRAM /WE pin
-    ANSELA2 = 0;
-    LATA2 = 1;  // /WR negate
-    TRISA2 = 0; // set as input
-
     // RA1: MREQ input pin
     ANSELA1 = 0; // Disable analog function
-    LATA1 = 1;  // /MREQ negate
-    TRISA1 = 0; // Set as input
-    
-    // BUSRQ on, enter BUSRQ mode
-    LATE0 = 0;  // /BUSRQ assert
-    LATE1 = 1;  // start CPU
-    nop; nop; nop; nop;
-    nop; nop; nop; nop;
-    TOGGLE;
-    TRISD &= 0xc0;
-    TRISB = 0;
+    TRISA1 = 1;
+    // RA5: /RD, SRAM /OE pin
+    ANSELA2 = 0;
+    TRISA2 = 1;
+    // RA2: /WR, SRAM /WE pin
+    ANSELA5 = 0;
+    TRISA5 = 1;
+
 #if 0
     // L-chika
     while (1) {
@@ -632,47 +761,6 @@ void main(void) {
             __delay_ms(10);
         }
     }
-#endif
-    
-    manualboot();
-    
-    // RESET again
-    LATE1 = 0;
-    LATE0 = 1;  // /BUSRQ deassert
-    db_setin();
-    TOGGLE;
-    TOGGLE;
-    // Re-initialze for CPU running
-    // RA5: /RD, SRAM /OE pin
-    ANSELA5 = 0;
-    LATA5 = 1;  // /RD negate
-    TRISA5 = 1; // set as input
-    
-    // RA2: /WR, SRAM /WE pin
-    ANSELA2 = 0;
-    LATA2 = 1;  // CS2 negate
-    TRISA2 = 1; // set as input
-
-    // RA1: MREQ input pin
-    ANSELA1 = 0; // Disable analog function
-    TRISA1 = 1; // Set as input
-
-
-#if 1
-    // Address bus A15-A8 pin
-    ANSELD = 0x00; // Disable analog function
-    WPUD = 0x3f; // Week pull up
-    TRISD |= 0x3f; // Set as input
-
-    // Address bus A7-A0 pin
-    ANSELB = 0x00; // Disable analog function
-    WPUB = 0xff; // Week pull up
-    TRISB = 0xff; // Set as input
-
-    // Data bus D7-D0 pin
-    ANSELC = 0x00; // Disable analog function
-    WPUC = 0xff; // Week pull up
-    TRISC = 0xff; // Set as input(default)
 #endif
     // reconfigurate CLC devices
     // CLC pin assign
@@ -713,6 +801,50 @@ void main(void) {
     // 3, 4, 7, 8: Port B, D
     RD6PPS = 0x03;      // CLC3 -> RD6 -> /WAIT
     
+    // Now IORQ cycle generate WAIT
+    init_boot();
+    manualboot();
+    end_boot();
+    
+    // RESET again
+    LATE1 = 0;
+    LATE0 = 1;  // /BUSRQ deassert
+    db_setin();
+    TOGGLE;
+    TOGGLE;
+#if 0
+    // Re-initialze for CPU running
+    // RA5: /RD, SRAM /OE pin
+    ANSELA5 = 0;
+    LATA5 = 1;  // /RD negate
+    TRISA5 = 1; // set as input
+    
+    // RA2: /WR, SRAM /WE pin
+    ANSELA2 = 0;
+    LATA2 = 1;  // CS2 negate
+    TRISA2 = 1; // set as input
+
+    // RA1: MREQ input pin
+    ANSELA1 = 0; // Disable analog function
+    TRISA1 = 1; // Set as input
+#endif
+
+#if 0
+    // Address bus A15-A8 pin
+    ANSELD = 0x00; // Disable analog function
+    WPUD = 0x3f; // Week pull up
+    TRISD |= 0x3f; // Set as input
+
+    // Address bus A7-A0 pin
+    ANSELB = 0x00; // Disable analog function
+    WPUB = 0xff; // Week pull up
+    TRISB = 0xff; // Set as input
+
+    // Data bus D7-D0 pin
+    ANSELC = 0x00; // Disable analog function
+    WPUC = 0xff; // Week pull up
+    TRISC = 0xff; // Set as input(default)
+#endif
     xprintf("start ss = %d, bp = %04X\n", ss_flag, break_address);
     // Z80 start
     //CLCDATA = 0x7;
