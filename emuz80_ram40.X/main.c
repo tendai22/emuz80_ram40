@@ -710,7 +710,12 @@ void main(void) {
     NCO1OUT = 1;  // NCO output enable
     NCO1EN = 1;   // NCO enable
     
-    //RA3PPS = 0;     // internal clock disable
+#if defined(EXTERNAL_CLOCK)
+    // If we use an external clock generator, we need to
+    // make RA3 pin Hi-Z.
+    RA3PPS = 0;     // internal clock disable
+    TRISA3 = 1;
+#endif
 
     // UART3 initialize
 //    U3BRG = 416; // 9600bps @ 64MHz
