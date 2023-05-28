@@ -1,0 +1,58 @@
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; TeraTerm用 BASIC実行時間計測マクロ
+;   Ver.4  2022.04.24
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;
+; タイムアウト設定
+timeout = 0
+
+;
+;; 開始時刻取得
+gettime starttime "%H:%M:%S"
+
+; RUN
+sendln 'RUN'
+
+
+; 終了待ち
+wait 'OK' 'ok' 'Ok' 'Ready'
+
+
+; 終了時刻取得・表示
+gettime endtime "%H:%M:%S"
+send 'REM  END:' endtime ' - START:' starttime
+
+; 実行時間計算
+;  開始時刻を秒に変換
+strsplit starttime ':'
+str2int ish groupmatchstr1
+str2int ism groupmatchstr2
+str2int iss groupmatchstr3
+startsec=ish*3600+ism*60+iss
+
+;  終了時刻を秒に変換
+strsplit endtime ':'
+str2int ish groupmatchstr1 
+str2int ism groupmatchstr2 
+str2int iss groupmatchstr3 
+endsec=ish*3600+ism*60+iss
+
+;  実行時間(秒)計算
+runsec=endsec-startsec
+; 24時を超えた場合
+if runsec < 0 then
+  runsec = runsec + 86400
+endif
+
+;  実行時間を時分秒に変換
+jth=runsec/3600
+jtm=(runsec - jth*3600)/60
+jts=runsec - jth*3600 - jtm*60
+sprintf2 jtt '%2.2d:%2.2d:%2.2d' jth jtm jts
+
+;  実行時間を表示
+int2str gst runsec
+sendln '  Execution time:' gst 'Sec  ' jtt
+
+; マクロ終了
+end
