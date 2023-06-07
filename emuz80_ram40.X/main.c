@@ -136,10 +136,12 @@ void RESET_CS2(void)
     LATA2 = 0;
 }
 
+#if 0
 void SET_CS2()
 {
     LATA2 = 1;
 }
+#endif
 
 void SRAM_for_PIC(void)
 {
@@ -154,7 +156,6 @@ void SRAM_for_PIC(void)
     TRISA5 = 0;
     nop; nop; nop; nop;
     nop; nop; nop; nop;
-    TRISD &= 0xc0;
     TRISB = 0;
 }
 
@@ -165,41 +166,10 @@ void SRAM_for_Z80(void)
     TRISA2 = 1;
     TRISA5 = 1;
     
-    TRISD |= 0x3f;
     TRISB = 0xff;
 }
 
 static addr_t cur_addr = 0;
-
-
-void putDataBus(unsigned char c)
-{
-    if (!RE1) {
-        RESET_off();
-    }
-    while (RD6);    // wait for /WAIT becomes L
-    // now in wait
-    //xprintf("%04X(%02X):%c %02X\n", cur_addr, PORTB, (RA5 ? 'W' : 'R'), c);
-    if (!RA5) { // /RD == L
-        RESET_CS2();
-        // RD cycle
-        nop; nop; nop;
-        db_setout();
-        TOGGLE;
-        LATC = c;
-        TOGGLE;
-    }
-end_of_cycle:
-    while(RA0 && RA1); // Wait for IORQ == L or MREQ == L;
-    BUSRQ_on();
-    reset_DFF(); // reset D-FF, /DTACK be zero
-    while(RA1 == 0); // Wait for DS = 1;
-    TOGGLE;
-    db_setin(); // Set data bus as input
-    TOGGLE;
-    SET_CS2();
-    BUSRQ_off();
-}
 
 void setAddr(addr_t a)
 {
@@ -209,35 +179,6 @@ void setAddr(addr_t a)
     LATB = ab.l;
 }
 
-unsigned char getDataBus()
-{
-    unsigned char c;
-    if (!RE1) {
-        RESET_off();
-    }
-    while (RD6);    // wait for /WAIT becomes L
-    // now in wait
-    //xprintf("%04X(%02X):%c ", cur_addr, PORTB, (RA5 ? 'W' : 'R'));
-    if (!RA5) {
-        // RD cycle
-        TOGGLE;
-        nop; nop; nop; nop;
-        c = PORTC;
-        //xprintf("%02X", c);
-        TOGGLE;
-    }
-    //xprintf("\n");
-end_of_cycle:
-    while(RA0 && RA1); // Wait for IORQ == L or MREQ == L;
-    BUSRQ_on();
-    reset_DFF(); // reset D-FF, /DTACK be zero
-    while(RA1 == 0); // Wait for DS = 1;
-    TOGGLE;
-    db_setin(); // Set data bus as input
-    TOGGLE;
-    BUSRQ_off();
-    return c;
-}
 
 // peek, poke
 
@@ -305,8 +246,7 @@ char peek_ram(addr_t addr)
     // other cases, put small code and run
     SRAM_for_PIC();
     BUSRQ_on();
-    RESET_off();                // enter BUSRQ mode
-    ab.w = addr;
+    RESET_on();                // enter BUSRQ mode
     deposit_ram(0, 0x3a);       // LD A,(addr)
     deposit_ram(1, (addr&255));
     deposit_ram(2, (addr/256));
@@ -314,7 +254,6 @@ char peek_ram(addr_t addr)
     deposit_ram(4, 0);
     deposit_ram(5, 0x76);       // HALT
     SRAM_for_Z80();
-    RESET_on();
     nop; nop; nop; nop;
     BUSRQ_off();
     RESET_off();            // start Z80
@@ -350,7 +289,7 @@ void poke_ram(addr_t addr, char c)
     // other cases, put small code and run
     SRAM_for_PIC();
     BUSRQ_on();
-    RESET_off();                // enter BUSRQ mode
+    RESET_on();                // enter BUSRQ mode
     ab.w = addr;
     deposit_ram(0, 0x3e);       // LD A,(nn)
     deposit_ram(1, c);
@@ -361,7 +300,6 @@ void poke_ram(addr_t addr, char c)
     deposit_ram(6, 0);
     deposit_ram(7, 0x76);       // HALT
     SRAM_for_Z80();
-    RESET_on();
     nop; nop; nop; nop;
     BUSRQ_off();
     RESET_off();            // start Z80
@@ -704,7 +642,7 @@ void main(void) {
     ANSELA3 = 0; // Disable analog function
     TRISA3 = 0; // NCO output pin
     NCO1INC = Z80_CLK * 2 / 61;
-    NCO1INC = 0x10000;
+    NCO1INC = 0x20000;
     NCO1CLK = 0x00; // Clock source Fosc
     NCO1PFM = 0;  // FDC mode
     NCO1OUT = 1;  // NCO output enable
